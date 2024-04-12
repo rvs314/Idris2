@@ -127,3 +127,29 @@ PartialEquivalence ty Equal where
 
 public export
 Equivalence ty Equal where
+
+public export
+Reflexive Type (<=>) where
+  reflexive = MkEquivalence id id
+
+public export
+Symmetric Type (<=>) where
+  symmetric (MkEquivalence ltr rtl) = MkEquivalence rtl ltr
+
+public export
+Transitive Type (<=>) where
+  transitive (MkEquivalence xy yx) (MkEquivalence yz zy) =
+    MkEquivalence (yz . xy) (yx . zy)
+
+public export
+Euclidean Type (<=>) where
+  euclidean = euclidean @{TSE}
+
+public export
+Tolerance Type (<=>) where
+
+public export
+PartialEquivalence Type (<=>) where
+
+public export
+Equivalence Type (<=>) where
