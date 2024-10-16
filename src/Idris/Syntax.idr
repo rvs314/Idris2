@@ -239,8 +239,8 @@ mutual
   public export
   data PDo' : Type -> Type where
        DoExp : FC -> PTerm' nm -> PDo' nm
-       DoBind : FC -> (nameFC : FC) -> Name -> PTerm' nm -> PDo' nm
-       DoBindPat : FC -> PTerm' nm -> PTerm' nm -> List (PClause' nm) -> PDo' nm
+       DoBind : FC -> (nameFC : FC) -> Name -> RigCount -> Maybe (PTerm' nm) -> PTerm' nm -> PDo' nm
+       DoBindPat : FC -> PTerm' nm -> Maybe (PTerm' nm) -> PTerm' nm -> List (PClause' nm) -> PDo' nm
        DoLet : FC -> (lhs : FC) -> Name -> RigCount -> PTerm' nm -> PTerm' nm -> PDo' nm
        DoLetPat : FC -> PTerm' nm -> PTerm' nm -> PTerm' nm -> List (PClause' nm) -> PDo' nm
        DoLetLocal : FC -> List (PDecl' nm) -> PDo' nm
@@ -258,8 +258,8 @@ mutual
   export
   getLoc : PDo' nm -> FC
   getLoc (DoExp fc _) = fc
-  getLoc (DoBind fc _ _ _) = fc
-  getLoc (DoBindPat fc _ _ _) = fc
+  getLoc (DoBind fc _ _ _ _ _) = fc
+  getLoc (DoBindPat fc _ _ _ _) = fc
   getLoc (DoLet fc _ _ _ _ _) = fc
   getLoc (DoLetPat fc _ _ _ _) = fc
   getLoc (DoLetLocal fc _) = fc
@@ -274,6 +274,11 @@ mutual
   applyArgs : PTerm' nm -> List (FC, PTerm' nm) -> PTerm' nm
   applyArgs f [] = f
   applyArgs f ((fc, a) :: args) = applyArgs (PApp fc f a) args
+
+  export
+  applyWithArgs : PTerm' nm -> List (FC, PTerm' nm) -> PTerm' nm
+  applyWithArgs f [] = f
+  applyWithArgs f ((fc, a) :: args) = applyWithArgs (PWithApp fc f a) args
 
   public export
   PTypeDecl : Type
@@ -376,6 +381,8 @@ mutual
        AutoImplicitDepth : Nat -> Directive
        NFMetavarThreshold : Nat -> Directive
        SearchTimeout : Integer -> Directive
+       -- There is no nm on Directive
+       ForeignImpl : Name -> List PTerm -> Directive
 
   public export
   PField : Type
@@ -703,8 +710,11 @@ parameters {0 nm : Type} (toName : nm -> Name)
   showAlt (MkImpossible _ lhs) = " | " ++ showPTerm lhs ++ " impossible;"
 
   showDo (DoExp _ tm) = showPTerm tm
-  showDo (DoBind _ _ n tm) = show n ++ " <- " ++ showPTerm tm
-  showDo (DoBindPat _ l tm alts)
+  showDo (DoBind _ _ n rig (Just ty) tm) = showCount rig ++ show n ++ " : " ++ showPTerm ty ++ " <- " ++ showPTerm tm
+  showDo (DoBind _ _ n rig _ tm) = showCount rig ++ show n ++ " <- " ++ showPTerm tm
+  showDo (DoBindPat _ l (Just ty) tm alts)
+      = showPTerm l ++ " : " ++ showPTerm ty ++ " <- " ++ showPTerm tm ++ concatMap showAlt alts
+  showDo (DoBindPat _ l _ tm alts)
       = showPTerm l ++ " <- " ++ showPTerm tm ++ concatMap showAlt alts
   showDo (DoLet _ _ l rig _ tm) = "let " ++ show l ++ " = " ++ showPTerm tm
   showDo (DoLetPat _ l _ tm alts)
@@ -1028,11 +1038,29 @@ addModDocInfo mi doc reexpts
                  , modDocexports $= insert mi reexpts
                  , modDocstrings $= insert mi doc }
 
--- remove a fixity from the context
+||| Remove a fixity from the context
 export
 removeFixity :
-    {auto s : Ref Syn SyntaxInfo} -> Fixity -> Name -> Core ()
-removeFixity _ key = update Syn ({fixities $= removeExact key })
+  {auto s : Ref Syn SyntaxInfo} -> FC -> Fixity -> Name -> Core ()
+removeFixity loc _ key = do
+  fixityInfo <- fixities <$> get Syn
+  if isJust $ lookupExact key fixityInfo
+     then -- When the fixity is found, simply remove it
+       update Syn ({ fixities $= removeExact key })
+     else -- When the fixity is not found, find close matches
+       let fixityNames : List Name = map fst (toList fixityInfo)
+           closeNames = !(filterM (coreLift . closeMatch key) fixityNames)
+           sameName : List Name = fst <$> lookupName (dropAllNS key) fixityInfo
+           similarNamespaces = nub (closeNames ++ sameName)
+       in if null similarNamespaces
+             then
+               throw $ GenericMsg loc "Fixity \{show key} not found"
+             else
+               throw $ GenericMsgSol loc "Fixity \{show key} not found" "Did you mean"
+                 $ map printFixityHide similarNamespaces
+  where
+    printFixityHide : Name -> String
+    printFixityHide nm = "%hide \{show nm}"
 
 ||| Return all fixity declarations for an operator name
 export

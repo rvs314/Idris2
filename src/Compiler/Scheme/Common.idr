@@ -207,7 +207,6 @@ data ExtPrim = NewIORef | ReadIORef | WriteIORef
              | SysOS | SysCodegen
              | OnCollect
              | OnCollectAny
-             | MakeFuture
              | Unknown Name
 
 export
@@ -225,7 +224,6 @@ Show ExtPrim where
   show SysCodegen = "SysCodegen"
   show OnCollect = "OnCollect"
   show OnCollectAny = "OnCollectAny"
-  show MakeFuture = "MakeFuture"
   show (Unknown n) = "Unknown " ++ show n
 
 ||| Match on a user given name to get the scheme primitive
@@ -243,8 +241,7 @@ toPrim pn@(NS _ n)
             (n == UN (Basic "prim__os"), SysOS),
             (n == UN (Basic "prim__codegen"), SysCodegen),
             (n == UN (Basic "prim__onCollect"), OnCollect),
-            (n == UN (Basic "prim__onCollectAny"), OnCollectAny),
-            (n == UN (Basic "prim__makeFuture"), MakeFuture)
+            (n == UN (Basic "prim__onCollectAny"), OnCollectAny)
             ]
            (Unknown pn)
 toPrim pn = Unknown pn
@@ -320,9 +317,28 @@ var _ = False
 getScrutineeTemp : Nat -> Builder
 getScrutineeTemp i = fromString $ "sc" ++ show i
 
+public export
+record LazyExprProc where
+  constructor MkLazyExprProc
+  processDelay : Builder -> Builder
+  processForce : Builder -> Builder
+
+public export
+defaultLaziness : LazyExprProc
+defaultLaziness = MkLazyExprProc
+  (\expr => "(lambda () " ++ expr ++ ")")
+  (\expr => "(" ++ expr ++ ")")
+
+public export
+weakMemoLaziness : LazyExprProc
+weakMemoLaziness = MkLazyExprProc
+  (\expr => "(blodwen-delay-lazy (lambda () " ++ expr ++ "))")
+  (\expr => "(blodwen-force-lazy " ++ expr ++ ")")
+
 parameters (constants : SortedSet Name,
             schExtPrim : Nat -> ExtPrim -> List NamedCExp -> Core Builder,
-            schString : String -> Builder)
+            schString : String -> Builder,
+            schLazy : LazyExprProc)
   showTag : Name -> Maybe Int -> Builder
   showTag n (Just i) = showB i
   showTag n Nothing = schString (show n)
@@ -535,10 +551,11 @@ parameters (constants : SortedSet Name,
        = do val' <- schExp i val
             sc' <- schExp i sc
             pure $ "(let ((" ++ schName x ++ " " ++ val' ++ ")) " ++ sc' ++ ")"
-    schExp i (NmApp fc x@(NmRef _ n) []) =
+    schExp i (NmApp fc x@(NmRef exp n) []) =
       if contains n constants
         then schExp i x
         else pure $ "(" ++ !(schExp i x) ++ ")"
+
     schExp i (NmApp fc x args)
         = pure $ "(" ++ !(schExp i x) ++ " " ++ sepBy " " !(traverse (schExp i) args) ++ ")"
     schExp i (NmCon fc _ NIL tag []) = pure $ "'()"
@@ -562,8 +579,10 @@ parameters (constants : SortedSet Name,
         = schOp op !(schArgs i args)
     schExp i (NmExtPrim fc p args)
         = schExtPrim i (toPrim p) args
-    schExp i (NmForce fc lr t) = pure $ "(" ++ !(schExp i t) ++ ")"
-    schExp i (NmDelay fc lr t) = pure $ "(lambda () " ++ !(schExp i t) ++ ")"
+    schExp i (NmForce _ _ (NmApp fc x@(NmRef _ _) []))
+       = pure $ "(force " ++ !(schExp i x) ++ ")" -- Special version for memoized toplevel lazy definitions
+    schExp i (NmForce fc lr t) = pure $ schLazy.processForce !(schExp i t)
+    schExp i (NmDelay fc lr t) = pure $ schLazy.processDelay !(schExp i t)
     schExp i (NmConCase fc sc alts def)
         = cond [(recordCase alts, schRecordCase i sc alts def),
                 (maybeCase alts, schMaybeCase i sc alts def),
@@ -652,10 +671,16 @@ parameters (constants : SortedSet Name,
 
   schDef : {auto c : Ref Ctxt Defs} ->
            Name -> NamedDef -> Core Builder
+
+  schDef n (MkNmFun [] (NmDelay _ _ exp))
+    = pure $ "(define " ++ schName !(getFullName n) ++ "(delay "
+                     ++ !(schExp 0 exp) ++ "))\n" -- Special version for memoized toplevel lazy definitions
+
   schDef n (MkNmFun [] exp)
      = if contains n constants
           then pure $ "(define " ++ schName !(getFullName n) ++ " " ++ !(schExp 0 exp) ++ ")\n"
           else pure $ "(define " ++ schName !(getFullName n) ++ " (lambda () " ++ !(schExp 0 exp) ++ "))\n"
+
 
   schDef n (MkNmFun args exp)
      = pure $ "(define " ++ schName !(getFullName n) ++ " (lambda (" ++ schArglist args ++ ") "
@@ -672,6 +697,7 @@ getScheme : {auto c : Ref Ctxt Defs} ->
             (constants  : SortedSet Name) ->
             (schExtPrim : Nat -> ExtPrim -> List NamedCExp -> Core Builder) ->
             (schString : String -> Builder) ->
+            (schLazy : LazyExprProc) ->
             (Name, FC, NamedDef) -> Core Builder
-getScheme constants schExtPrim schString (n, fc, d)
-    = schDef constants schExtPrim schString n d
+getScheme constants schExtPrim schString schLazy (n, fc, d)
+    = schDef constants schExtPrim schString schLazy n d

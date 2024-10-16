@@ -631,7 +631,7 @@ mutual
                   decoratedSymbol fname "]"
                   pure ts
            pure (PQuoteDecl (boundToFC fname b) (collectDefs (concat b.val)))
-    <|> do b <- bounds (decoratedSymbol fname "~" *> simpleExpr fname indents)
+    <|> do b <- bounds (decoratedSymbol fname "~" *> simplerExpr fname indents)
            pure (PUnquote (boundToFC fname b) b.val)
     <|> do start <- bounds (symbol "(")
            bracketedExpr fname start indents
@@ -782,10 +782,21 @@ mutual
            commit
            switch <- optional (bounds $ decoratedKeyword fname "case")
            case switch of
-             Nothing => continueLam
+             Nothing => continueLamImpossible <|> continueLam
              Just r  => continueLamCase r
 
      where
+       continueLamImpossible : Rule PTerm
+       continueLamImpossible = do
+           lhs <- bounds (opExpr plhs fname indents)
+           end <- bounds (decoratedKeyword fname "impossible")
+           pure (
+             let fc = boundToFC fname (mergeBounds lhs end)
+                 alt = (MkImpossible fc lhs.val)
+                 fcCase = boundToFC fname lhs
+                 n = MN "lcase" 0 in
+             (PLam fcCase top Explicit (PRef fcCase n) (PInfer fcCase) $
+                 PCase (virtualiseFC fc) [] (PRef fcCase n) [alt]))
 
        bindAll : List (RigCount, WithBounds PTerm, PTerm) -> PTerm -> PTerm
        bindAll [] scope = scope
@@ -966,16 +977,18 @@ mutual
 
   doAct : OriginDesc -> IndentInfo -> Rule (List PDo)
   doAct fname indents
-      = do b <- bounds (do n <- bounds (name <|> UN Underscore <$ symbol "_")
+      = do b <- bounds (do rig <- multiplicity fname
+                           n <- bounds (name <|> UN Underscore <$ symbol "_")
                            -- If the name doesn't begin with a lower case letter, we should
                            -- treat this as a pattern, so fail
                            validPatternVar n.val
+                           ty <- optional (decoratedSymbol fname ":" *> typeExpr (pnoeq pdef) fname indents)
                            decoratedSymbol fname "<-"
                            val <- expr pdef fname indents
-                           pure (n, val))
+                           pure (n, rig, ty, val))
            atEnd indents
-           let (n, val) = b.val
-           pure [DoBind (boundToFC fname b) (boundToFC fname n) n.val val]
+           let (n, rig, ty, val) = b.val
+           pure [DoBind (boundToFC fname b) (boundToFC fname n) n.val rig ty val]
     <|> do decoratedKeyword fname "let"
            commit
            res <- nonEmptyBlock (letBlock fname)
@@ -989,11 +1002,12 @@ mutual
            pure [DoRewrite (boundToFC fname b) b.val]
     <|> do e <- bounds (expr plhs fname indents)
            (atEnd indents $> [DoExp (virtualiseFC $ boundToFC fname e) e.val])
-             <|> (do b <- bounds $ decoratedSymbol fname "<-" *> [| (expr pnowith fname indents, block (patAlt fname)) |]
+             <|> (do ty <- optional (decoratedSymbol fname ":" *> typeExpr (pnoeq pdef) fname indents)
+                     b <- bounds $ decoratedSymbol fname "<-" *> [| (expr pnowith fname indents, block (patAlt fname)) |]
                      atEnd indents
                      let (v, alts) = b.val
                      let fc = virtualiseFC $ boundToFC fname (mergeBounds e b)
-                     pure [DoBindPat fc e.val v alts])
+                     pure [DoBindPat fc e.val ty v alts])
 
   patAlt : OriginDesc -> IndentInfo -> Rule PClause
   patAlt fname indents
@@ -1217,6 +1231,7 @@ mutual
        = do b <- bounds $ do
                    decoratedSymbol fname "="
                    mustWork $ do
+                     continue indents
                      rhs <- typeExpr pdef fname indents
                      ws <- option [] $ whereBlock fname col
                      pure (rhs, ws)
@@ -1224,7 +1239,7 @@ mutual
             mustWorkBecause b'.bounds "Not the end of a block entry, check indentation" $ atEnd indents
             (rhs, ws) <- pure b.val
             let fc = boundToFC fname (mergeBounds start b)
-            pure (MkPatClause fc (uncurry applyArgs lhs) rhs ws)
+            pure (MkPatClause fc (uncurry applyWithArgs lhs) rhs ws)
      <|> do b <- bounds $ do
                    decoratedKeyword fname "with"
                    commit
@@ -1235,11 +1250,11 @@ mutual
                    pure (flags, wps, forget ws)
             (flags, wps, ws) <- pure b.val
             let fc = boundToFC fname (mergeBounds start b)
-            pure (MkWithClause fc (uncurry applyArgs lhs) wps flags ws)
+            pure (MkWithClause fc (uncurry applyWithArgs lhs) wps flags ws)
      <|> do end <- bounds (decoratedKeyword fname "impossible")
             atEnd indents
             pure $ let fc = boundToFC fname (mergeBounds start end) in
-                   MkImpossible fc (uncurry applyArgs lhs)
+                   MkImpossible fc (uncurry applyWithArgs lhs)
 
   clause : (withArgs : Nat) ->
            IMaybe (isSucc withArgs) (PTerm, List (FC, PTerm)) ->
@@ -1426,6 +1441,11 @@ directive fname indents
          n <- name
          atEnd indents
          pure (Unhide n)
+  <|> do decoratedPragma fname "foreign_impl"
+         n <- name
+         cs <- block (expr pdef fname)
+         atEnd indents
+         pure (ForeignImpl n cs)
 --   <|> do pragma "hide_export"
 --          n <- name
 --          atEnd indents

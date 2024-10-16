@@ -2,6 +2,7 @@ module Idris.Desugar
 
 import Core.Context
 import Core.Context.Log
+import Core.CompileExpr
 import Core.Core
 import Core.Env
 import Core.Metadata
@@ -31,6 +32,7 @@ import Parser.Support
 
 import TTImp.BindImplicits
 import TTImp.Parser
+import TTImp.ProcessType
 import TTImp.TTImp
 import TTImp.Utils
 
@@ -733,14 +735,15 @@ mutual
       = do tm' <- desugarDo side ps ns tm
            rest' <- expandDo side ps topfc ns rest
            pure $ seqFun fc ns tm' rest'
-  expandDo side ps topfc ns (DoBind fc nameFC n tm :: rest)
+  expandDo side ps topfc ns (DoBind fc nameFC n rig ty tm :: rest)
       = do tm' <- desugarDo side ps ns tm
            rest' <- expandDo side ps topfc ns rest
            whenJust (isConcreteFC nameFC) $ \nfc => addSemanticDecorations [(nfc, Bound, Just n)]
+           ty' <- maybe (pure $ Implicit (virtualiseFC fc) False)
+                        (\ty => desugarDo side ps ns ty) ty
            pure $ bindFun fc ns tm'
-                $ ILam nameFC top Explicit (Just n)
-                       (Implicit (virtualiseFC fc) False) rest'
-  expandDo side ps topfc ns (DoBindPat fc pat exp alts :: rest)
+                $ ILam nameFC rig Explicit (Just n) ty' rest'
+  expandDo side ps topfc ns (DoBindPat fc pat ty exp alts :: rest)
       = do pat' <- desugarDo LHS ps ns pat
            (newps, bpat) <- bindNames False pat'
            exp' <- desugarDo side ps ns exp
@@ -750,9 +753,11 @@ mutual
            let fcOriginal = fc
            let fc = virtualiseFC fc
            let patFC = virtualiseFC (getFC bpat)
+           ty' <- maybe (pure $ Implicit fc False)
+                        (\ty => desugarDo side ps ns ty) ty
            pure $ bindFun fc ns exp'
                 $ ILam EmptyFC top Explicit (Just (MN "_" 0))
-                          (Implicit fc False)
+                          ty'
                           (ICase fc [] (IVar patFC (MN "_" 0))
                                (Implicit fc False)
                                (PatClause fcOriginal bpat rest'
@@ -883,6 +888,7 @@ mutual
   getClauseFn : RawImp -> Core Name
   getClauseFn (IVar _ n) = pure n
   getClauseFn (IApp _ f _) = getClauseFn f
+  getClauseFn (IWithApp _ f _) = getClauseFn f
   getClauseFn (IAutoApp _ f _) = getClauseFn f
   getClauseFn (INamedApp _ f _ _) = getClauseFn f
   getClauseFn tm = throw $ GenericMsg (getFC tm) "Head term in pattern must be a function name"
@@ -1021,6 +1027,7 @@ mutual
   displayFixity : Maybe Visibility -> BindingModifier -> Fixity -> Nat -> OpStr -> String
   displayFixity Nothing NotBinding fix prec op = "\{show fix} \{show  prec} \{show op}"
   displayFixity Nothing bind fix prec op = "\{show bind} \{show fix} \{show  prec} \{show op}"
+  displayFixity (Just vis) NotBinding fix prec op = "\{show vis} \{show fix} \{show  prec} \{show op}"
   displayFixity (Just vis) bind fix prec op = "\{show vis} \{show bind} \{show fix} \{show  prec} \{show op}"
 
   -- Given a high level declaration, return a list of TTImp declarations
@@ -1215,7 +1222,7 @@ mutual
   desugarDecl ps fx@(PFixity fc vis binding fix prec opName)
       = do unless (checkValidFixity binding fix prec)
              (throw $ GenericMsgSol fc
-                 "Invalid fixity, \{binding} operator must be infixr 0."
+                 "Invalid fixity, \{binding} operator must be infixr 0." "Possible solutions"
                  [ "Make it `infixr 0`: `\{binding} infixr 0 \{show opName}`"
                  , "Remove the binding keyword: `\{fix} \{show prec} \{show opName}`"
                  ])
@@ -1302,7 +1309,7 @@ mutual
   desugarDecl ps (PDirective fc d)
       = case d of
              Hide (HideName n) => pure [IPragma fc [] (\nest, env => hide fc n)]
-             Hide (HideFixity fx n) => pure [IPragma fc [] (\_, _ => removeFixity fx n)]
+             Hide (HideFixity fx n) => pure [IPragma fc [] (\_, _ => removeFixity fc fx n)]
              Unhide n => pure [IPragma fc [] (\nest, env => unhide fc n)]
              Logging i => pure [ILog ((\ i => (topics i, verbosity i)) <$> i)]
              LazyOn a => pure [IPragma fc [] (\nest, env => lazyActive a)]
@@ -1330,6 +1337,19 @@ mutual
              Overloadable n => pure [IPragma fc [] (\nest, env => setNameFlag fc n Overloadable)]
              Extension e => pure [IPragma fc [] (\nest, env => setExtension e)]
              DefaultTotality tot => pure [IPragma fc [] (\_, _ => setDefaultTotalityOption tot)]
+             ForeignImpl n cs => do
+               cs' <- traverse (desugar AnyExpr ps) cs
+               pure [IPragma fc [] (\nest, env => do
+                      defs <- get Ctxt
+                      calls <- traverse getFnString cs'
+                      [(n',_,gdef)] <- lookupCtxtName n (gamma defs)
+                        | [] => throw (UndefinedName fc n)
+                        | xs => throw (AmbiguousName fc (map fst xs))
+                      let ForeignDef arity xs = gdef.definition
+                        | _ => throw (GenericMsg fc "\{show n} is not a foreign definition")
+
+                      update Ctxt { options->foreignImpl $= (map (n',) calls ++) }
+                    )]
   desugarDecl ps (PBuiltin fc type name) = pure [IBuiltin fc type name]
 
   export
