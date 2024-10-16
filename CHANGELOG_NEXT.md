@@ -225,6 +225,8 @@ This CHANGELOG describes the merged but unreleased changes. Please see [CHANGELO
 
 * Added `Data.IORef.atomically` for the chez backend.
 
+* Added implementations of `Reflexive`, `Symmetric` and `Transitive` for equivalence objects.
+
 #### Contrib
 
 * `Data.List.Lazy` was moved from `contrib` to `base`.
